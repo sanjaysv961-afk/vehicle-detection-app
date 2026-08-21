@@ -1,123 +1,47 @@
-from flask import Flask, request, jsonify, send_from_directory
-from flask_cors import CORS
+import streamlit as st
+import cv2
 import numpy as np
+from PIL import Image
+from ultralytics import YOLO
 
-app = Flask(__name__, static_folder='.')
-CORS(app)
+# Cache the model so it doesn't reload on every interaction
+@st.cache_resource
+def load_model():
+    return YOLO('yolov8n.pt')
 
-# ── Simple rule-based ML-style predictor ──────────────────────────────────────
-# In a real project you'd load a trained sklearn model here:
-#   import joblib
-#   model = joblib.load("attendance_model.pkl")
+model = load_model()
 
-def predict_attendance(total: int, attended: int):
-    if total <= 0:
-        return None, None, None, None, None
+# Website Layout and UI
+st.set_page_config(page_title="Traffic Vehicle Detection", page_icon="🚦")
+st.title("🚦 Real-Time Vehicle Detection")
+st.write("Upload a traffic image, and our Deep Learning model will detect and classify cars, trucks, buses, and motorcycles.")
 
-    pct = (attended / total) * 100
+# File Uploader
+uploaded_file = st.file_uploader("Upload an Image", type=["jpg", "jpeg", "png"])
 
-    # Risk classification (mirrors a trained Decision-Tree boundary)
-    if pct >= 85:
-        risk = "Low Risk"
-        color = "green"
-        advice = "Excellent attendance! Keep it up."
-    elif pct >= 75:
-        risk = "Moderate Risk"
-        color = "orange"
-        needed = max(0, round((0.75 * total - attended) / (1 - 0.75)))
-        advice = f"You need {needed} more classes to stay comfortably safe."
-    else:
-        # Calculate classes needed to reach 75%
-        needed = max(0, round((0.75 * total - attended) / (1 - 0.75)))
-        risk = "High Risk"
-        color = "red"
-        advice = f"Attend next {needed} consecutive classes to reach 75%."
-
-    # How many classes can still be safely missed?
-    can_miss = max(0, int(attended - 0.75 * total))
-
-    return round(pct, 2), risk, color, advice, can_miss
-
-
-@app.route("/predict", methods=["POST"])
-def predict():
-    data = request.get_json(force=True)
-    try:
-        total    = int(data["total"])
-        attended = int(data["attended"])
-    except (KeyError, ValueError):
-        return jsonify({"error": "Invalid input"}), 400
-
-    if attended > total:
-        return jsonify({"error": "Attended cannot exceed total classes"}), 400
-
-    pct, risk, color, advice, can_miss = predict_attendance(total, attended)
-
-    if pct is None:
-        return jsonify({"error": "Total classes must be greater than 0"}), 400
-
-    return jsonify({
-        "percentage": pct,
-        "risk":       risk,
-        "color":      color,
-        "advice":     advice,
-        "can_miss":   can_miss,
-        "result":     f"{pct}% attendance — {risk}"
-    })
-
-
-@app.route("/bulk_predict", methods=["POST"])
-def bulk_predict():
-    """Accept a list of students and return predictions for each."""
-    students = request.get_json(force=True)
-    results  = []
-    for s in students:
-        try:
-            total    = int(s["total"])
-            attended = int(s["attended"])
-            name     = s.get("name", "Unknown")
-            pct, risk, color, advice, can_miss = predict_attendance(total, attended)
-            results.append({
-                "name":       name,
-                "percentage": pct,
-                "risk":       risk,
-                "color":      color,
-                "advice":     advice,
-                "can_miss":   can_miss,
-            })
-        except Exception:
-            results.append({"name": s.get("name", "?"), "error": "Invalid data"})
-    return jsonify(results)
-
-
-@app.route("/stats", methods=["POST"])
-def stats():
-    """Return simple descriptive statistics for a class."""
-    students = request.get_json(force=True)
-    pcts = []
-    for s in students:
-        try:
-            pcts.append(int(s["attended"]) / int(s["total"]) * 100)
-        except Exception:
-            pass
-    if not pcts:
-        return jsonify({"error": "No valid data"}), 400
-    arr = np.array(pcts)
-    return jsonify({
-        "mean":   round(float(arr.mean()), 2),
-        "median": round(float(np.median(arr)), 2),
-        "min":    round(float(arr.min()), 2),
-        "max":    round(float(arr.max()), 2),
-        "std":    round(float(arr.std()), 2),
-        "at_risk_count": int((arr < 75).sum()),
-        "total_students": len(arr),
-    })
-
-
-@app.route("/")
-def index():
-    return send_from_directory(".", "index.html")
-
-
-if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+if uploaded_file is not None:
+    # Display the uploaded image
+    image = Image.open(uploaded_file)
+    st.image(image, caption="Uploaded Image", use_container_width=True)
+    
+    # Process the image when the button is clicked
+    if st.button("Detect Vehicles"):
+        with st.spinner('Analyzing traffic...'):
+            # Convert PIL image to OpenCV format (NumPy array)
+            img_array = np.array(image)
+            
+            # Run YOLOv8 inference (Filtering for vehicles: 2=car, 3=motorcycle, 5=bus, 7=truck)
+            results = model.predict(img_array, classes=[2, 3, 5, 7], conf=0.4)
+            
+            # Plot the bounding boxes on the image
+            res_plotted = results[0].plot()
+            
+            # Convert back to PIL format (RGB) for Streamlit to display properly
+            result_image = Image.fromarray(res_plotted[..., ::-1])
+            
+            st.success("Detection Complete!")
+            st.image(result_image, caption="Detected Vehicles", use_container_width=True)
+            
+            # Display a count of detected vehicles
+            vehicle_count = len(results[0].boxes)
+            st.info(f"Total Vehicles Detected: {vehicle_count}")
